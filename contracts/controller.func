@@ -67,7 +67,7 @@ global int sudoer_set_at;
 global int interest;
 
 global int allowed_borrow_start_prior_elections_end;
-global int approver_set_profit_share;
+global int current_profit_share;
 global int acceptable_profit_share;
 global int allocation;
 
@@ -127,7 +127,7 @@ int check_new_stake_msg(slice cs);
               if(op == pool::loan_repayment) {
                 borrowed_amount += msg_value;
                 borrowing_time = now();
-              } elseif (op == pool::request_loan) {
+              } elseif (op == pool::request_loan2) {
                 if (state == state::SENT_BORROWING_REQUEST) {
                   state = state::REST;
                 } else {
@@ -154,7 +154,7 @@ int check_new_stake_msg(slice cs);
                 int profit = msg_value - stake_amount_sent;
                 int amount_to_return = max(borrowed_amount,
                                            muldiv(borrowed_amount, SHARE_BASIS, SHARE_BASIS + interest) +  ;; restore credit body
-                                              muldiv(approver_set_profit_share, profit, SHARE_BASIS));
+                                              muldiv(current_profit_share, profit, SHARE_BASIS));
                 if( amount_to_return ) {
                   if(balance >= MIN_TONS_FOR_STORAGE + amount_to_return) {
                     send_msg(pool,
@@ -216,8 +216,15 @@ int check_new_stake_msg(slice cs);
                 ifnot(borrowing_time) {
                   borrowing_time = now();
                 }
+
                 int credit_amount = in_msg_body~load_coins();
                 borrowed_amount += credit_amount;
+
+                ifnot (in_msg_body.slice_empty?()) {
+                    current_profit_share = in_msg_body~load_share();
+                    throw_unless(error::profit_share_mismatch, acceptable_profit_share >= current_profit_share);
+                }
+
                 in_msg_body.end_parse();
                 throw_unless(error::credit_interest_too_high, credit_amount < muldiv(msg_value, interest + SHARE_BASIS, SHARE_BASIS) + ONE_TON);
                 interest = muldiv(credit_amount - msg_value, SHARE_BASIS, msg_value);
@@ -238,15 +245,6 @@ int check_new_stake_msg(slice cs);
                 approved? = true;
                 allowed_borrow_start_prior_elections_end = in_msg_body~load_timestamp();
                 allocation = in_msg_body~load_coins();
-                int new_profit_share = in_msg_body~load_share();
-                if (new_profit_share) {
-                    if(new_profit_share > approver_set_profit_share) {
-                        ;; do not allow to increase profit share for controller which validate right now
-                        ;; note, controller can be disapproved
-                        assert_state!(state::REST);
-                    }
-                }
-                approver_set_profit_share = new_profit_share;
             }  elseif (op == controller::disapprove) {
                 assert_sender!(sender_address, approver);
                 ;; we do not end_parse here, because unprocessed data
@@ -438,7 +436,6 @@ int check_new_stake_msg(slice cs);
                   } else {
                       acceptable_profit_share = 0;
                   }
-                  throw_unless(error::profit_share_mismatch, acceptable_profit_share >= approver_set_profit_share);
 
                   in_msg_body.end_parse();
                   interest = max_interest;
@@ -458,15 +455,14 @@ int check_new_stake_msg(slice cs);
 
                   ;; lets check whether we can afford it
                   int elector_fine = max_recommended_punishment_for_validator_misbehaviour(max_loan + balance);
-                  int interest_payment = muldiv(max_loan, max_interest, SHARE_BASIS);
                   int validator_amount = balance - borrowed_amount;
-                    throw_unless(error::too_high_loan_request_amount, validator_amount >= ENSURABLE_BALANCE_FOR_STAKING + elector_fine + interest_payment);
+                    throw_unless(error::too_high_loan_request_amount, validator_amount >= ENSURABLE_BALANCE_FOR_STAKING + elector_fine);
                     if(allocation) { ;; zero allocation means no limit
                       throw_unless(error::too_high_loan_request_amount, max_loan <= allocation);
                     }
 
                   cell payload = begin_cell()
-                                             .store_body_header(pool::request_loan, query_id)
+                                             .store_body_header(pool::request_loan2, query_id)
                                              .store_slice(request)
                                              .store_slice(static_data)
                                  .end_cell();
@@ -530,7 +526,7 @@ int check_new_stake_msg(slice cs);
         .store_timestamp(sudoer_set_at)
         .store_share(interest)
         .store_timestamp(allowed_borrow_start_prior_elections_end)
-        .store_share(approver_set_profit_share)
+        .store_share(current_profit_share)
         .store_share(acceptable_profit_share)
         .store_coins(allocation)
         .store_slice(static_data)
@@ -561,7 +557,7 @@ int check_new_stake_msg(slice cs);
     interest = ds~load_share();
 
     allowed_borrow_start_prior_elections_end = ds~load_timestamp();
-    approver_set_profit_share = ds~load_share();
+    current_profit_share = ds~load_share();
     acceptable_profit_share = ds~load_share();
     allocation = ds~load_coins();
 
@@ -624,7 +620,7 @@ _ get_validator_controller_data() method_id {
       stake_held_for,
 
       interest, allowed_borrow_start_prior_elections_end,
-      approver_set_profit_share, acceptable_profit_share, allocation,
+      current_profit_share, acceptable_profit_share, allocation,
 
       borrowed_amount, borrowing_time,
       validator, pool, sudoer

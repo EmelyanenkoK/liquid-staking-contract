@@ -1,6 +1,6 @@
 import { Blockchain, BlockchainSnapshot, BlockchainTransaction, internal, SandboxContract, TreasuryContract } from '@ton/sandbox';
 import { Address, Cell, toNano, Dictionary, beginCell, Sender, SendMode, Slice, Transaction } from '@ton/core';
-import { Pool } from '../wrappers/Pool';
+import { Pool, PoolChildCodes } from '../wrappers/Pool';
 import { Controller } from '../wrappers/Controller';
 import { JettonMinter as DAOJettonMinter, jettonContentToCell } from '../contracts/jetton_dao/wrappers/JettonMinter';
 import { JettonWallet as PoolJettonWallet } from '../wrappers/JettonWallet';
@@ -164,10 +164,18 @@ describe('Governor actions tests', () => {
             const mockCell = beginCell().storeUint(Date.now(), 256).endCell();
             // Intended to check availability only. State should be preserved
             const prevState = bc.snapshot();
-            let   res     = await pool.sendSudoMsg(via, 0, testMsg);
-            assertExitCode(res.transactions, exp_code);
-            res = await pool.sendUpgrade(via, mockCell, mockCell, mockCell);
-            assertExitCode(res.transactions, exp_code);
+            let testSendMsg = async () => await pool.sendSudoMsg(via, 0, testMsg);
+            let testSendUpgrade = async () =>  await pool.sendUpgrade(via, mockCell, mockCell, mockCell);
+            let testSendSetCodes = async () => await pool.sendSetCodes(via, {
+                controller: mockCell,
+                jetton_wallet: mockCell,
+                payout_minter: mockCell
+            });
+            for(let testCase of [testSendMsg, testSendUpgrade, testSendSetCodes]) {
+                const res = await testCase();
+                assertExitCode(res.transactions, exp_code);
+            }
+
             await bc.loadFrom(prevState);
         }
     });
@@ -558,7 +566,7 @@ describe('Governor actions tests', () => {
                         to: pool.address,
                         value: toNano('1'),
                         body: beginCell()
-                                .storeUint(Op.pool.request_loan, 32)
+                                .storeUint(Op.pool.request_loan2, 32)
                                 .storeUint(1, 64)
                                 .storeCoins(toNano('100000'))
                                 .storeCoins(toNano('100000'))
@@ -733,6 +741,80 @@ describe('Governor actions tests', () => {
           op: 1337
         });
         await bc.loadFrom(prevState);
+    });
+    it('Sudoer should be able to set childCodes', async () => {
+        const prevState  = bc.snapshot();
+        const newChildCodes: PoolChildCodes = {
+            controller: beginCell().storeStringTail("Hop").endCell(),
+            jetton_wallet: beginCell().storeStringTail("Hey").endCell(),
+            payout_minter: beginCell().storeStringTail("La la ley").endCell()
+        }
+
+        const dataBefore = await pool.getFullData();
+        expect(dataBefore.controllerCode).not.toEqualCell(newChildCodes.controller);
+        expect(dataBefore.jettonWalletCode).not.toEqualCell(newChildCodes.jetton_wallet);
+        expect(dataBefore.payoutMinterCode).not.toEqualCell(newChildCodes.payout_minter);
+
+        const res = await pool.sendSetCodes(deployer.getSender(), newChildCodes);
+
+        expect(res.transactions).toHaveTransaction({
+                on: pool.address,
+                op: Op.sudo.set_codes,
+                aborted: false
+        });
+        const dataAfter = await pool.getFullData();
+        expect(dataAfter.controllerCode).toEqualCell(newChildCodes.controller);
+        expect(dataAfter.jettonWalletCode).toEqualCell(newChildCodes.jetton_wallet);
+        expect(dataAfter.payoutMinterCode).toEqualCell(newChildCodes.payout_minter);
+
+        await bc.loadFrom(prevState);
+    });
+    it('Sudoer should be able to set new childCodes independently', async () => {
+        const prevState  = bc.snapshot();
+
+
+        const testPartialCodes = async (codes: Partial<PoolChildCodes>) => {
+            const codeDataMap: Map<keyof PoolChildCodes, keyof Awaited<ReturnType<Pool['getFullData']>>> = new Map([
+                ['controller', 'controllerCode'],
+                ['jetton_wallet', 'jettonWalletCode'],
+                ['payout_minter', 'payoutMinterCode'],
+            ]);
+
+            const dataBefore = await pool.getFullData();
+            const res = await pool.sendSetCodes(deployer.getSender(), codes)
+            expect(res.transactions).toHaveTransaction({
+                    on: pool.address,
+                    op: Op.sudo.set_codes,
+                    aborted: false
+            });
+            const dataAfter = await pool.getFullData();
+            for(let [codeKey, dataKey] of  [...codeDataMap.entries()]) {
+                const newCode = codes[codeKey];
+                if(newCode) {
+                    expect(dataAfter[dataKey]).toEqualCell(newCode)
+                    codeDataMap.delete(codeKey);
+                }
+            }
+            // If anything left, iterate and check that those fields didn't change
+            for(let dataKey of codeDataMap.values()) {
+                expect(dataAfter[dataKey]).toEqualCell(dataBefore[dataKey] as Cell);
+            }
+
+            await bc.loadFrom(prevState);
+        }
+        const randomTestCell = () => beginCell().storeUint(getRandomInt(0, (2 ** 32)) - 1,32 ).endCell();
+
+        let updateController = {controller: randomTestCell()}
+        let updateWallet = {jetton_wallet: randomTestCell()};
+        let updateMinter =  {payout_minter: randomTestCell()};
+        let controllerComb = [{...updateController, ...updateWallet}, {...updateController, ...updateMinter}];
+        let walletComb = [{...updateWallet, ...updateMinter}];
+        // All the minter combs are already exhausted
+
+        let testCases = [updateController, updateWallet, updateMinter, ...controllerComb, ...walletComb];
+        for(let testOpts of testCases) {
+            await testPartialCodes(testOpts);
+        }
     });
     it('Upgrade should not impact code/data when if not specified', async() => {
         const prevState = bc.snapshot();

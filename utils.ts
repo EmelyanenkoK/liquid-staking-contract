@@ -81,6 +81,14 @@ export const getRandomTon = (min:number | string | bigint, max:number | string |
     return toNano(getRandom(minVal, maxVal).toFixed(9));
 }
 
+export const topNBits = (value: bigint, n: number) => {
+    const maxVal = BigInt((2 ** n) - 1);
+    while(value > maxVal) {
+        value /= 2n;
+    }
+    return value;
+}
+
 export const buff2bigint = (buff: Buffer) : bigint => {
     return BigInt("0x" + buff.toString("hex"));
 }

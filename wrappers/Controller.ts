@@ -15,8 +15,7 @@ export type ControllerConfig = {
 
 export type ApproveOptions = {
     startPriorElectionsEnd: number,
-    allocation: bigint,
-    profitShare: number
+    allocation: bigint
 };
 
 export function controllerConfigToCell(config: ControllerConfig): Cell {
@@ -91,11 +90,15 @@ export class Controller implements Contract {
         });
     }
 
-    static creditMessage(credit:bigint, query_id:number | bigint = 0) {
-        return beginCell().storeUint(Op.controller.credit, 32)
+    static creditMessage(credit:bigint, exp_rev_share?: number, query_id:number | bigint = 0) {
+        const ds = beginCell().storeUint(Op.controller.credit, 32)
                           .storeUint(query_id, 64)
                           .storeCoins(credit)
-               .endCell();
+
+        if(exp_rev_share !== undefined) {
+            ds.storeUint(exp_rev_share, 24);
+        }
+        return ds.endCell();
     }
 
     async sendCredit(provider: ContractProvider,
@@ -106,7 +109,7 @@ export class Controller implements Contract {
         await provider.internal(via, {
             value: value,
             sendMode: SendMode.PAY_GAS_SEPARATELY,
-            body: Controller.creditMessage(credit, query_id)
+            body: Controller.creditMessage(credit, undefined, query_id)
         });
     }
 
@@ -166,7 +169,6 @@ export class Controller implements Contract {
                 .storeUint(query_id, 64)
                 .storeUint(opts.startPriorElectionsEnd, 48)
                 .storeCoins(opts.allocation)
-                .storeUint(opts.profitShare, 24)
                .endCell();
     }
 

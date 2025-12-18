@@ -24,7 +24,7 @@ export type PoolConfig = {
 type RoundData = {borrowers: Cell | null, roundId: number,
                                   activeBorrowers: bigint, borrowed: bigint,
                                   expected: bigint, returned: bigint,
-                                  profit: bigint};
+                                  profit: bigint, withdrawRatePrev2X24: bigint};
 
 type State = typeof PoolState.NORMAL | typeof PoolState.REPAYMENT_ONLY;
 export type PoolFullConfig = {
@@ -67,6 +67,11 @@ export type PoolFullConfig = {
   pool_jetton_wallet_code: Cell;
   payout_minter_code: Cell;
 };
+export type PoolChildCodes = {
+    controller: Cell,
+    jetton_wallet: Cell,
+    payout_minter: Cell
+}
 
 export type PoolData = Awaited<ReturnType<InstanceType<typeof Pool>['getFullData']>>;
 
@@ -411,7 +416,7 @@ export class Pool implements Contract {
    }
     async sendSetDepositSettings(provider: ContractProvider, via: Sender, value: bigint,
                                  optimistic: Boolean, depositOpen: Boolean,
-                                 instantWithdrawalFee: number = 0) {
+                                 instantWithdrawalFee: number = 0, revShare: number = 0) {
         await provider.internal(via, {
             value,
             sendMode: SendMode.PAY_GAS_SEPARATELY,
@@ -421,6 +426,7 @@ export class Pool implements Contract {
                      .storeUint(Number(optimistic), 1)
                      .storeUint(Number(depositOpen), 1)
                      .storeUint(instantWithdrawalFee, 24)
+                     .storeUint(revShare, 24)
                   .endCell(),
         });
     }
@@ -637,6 +643,26 @@ export class Pool implements Contract {
                   .endCell(),
         });
     }
+    static sudoSetCodesMessage(codes: Partial<PoolChildCodes>, query_id: bigint | number = 0) {
+        const codesCell = beginCell()
+                            .storeMaybeRef(codes.controller)
+                            .storeMaybeRef(codes.jetton_wallet)
+                            .storeMaybeRef(codes.payout_minter)
+                         .endCell();
+        return beginCell()
+                .storeUint(Op.sudo.set_codes, 32)
+                .storeUint(query_id, 64)
+                .storeRef(codesCell)
+              .endCell();
+    }
+
+    async sendSetCodes(provider: ContractProvider, via: Sender, codes: Partial<PoolChildCodes>, value: bigint = toNano('0.05'), query_id: bigint | number = 0) {
+        await provider.internal(via, {
+            value,
+            sendMode: SendMode.PAY_GAS_SEPARATELY,
+            body: Pool.sudoSetCodesMessage(codes, query_id)
+        });
+    }
 
     // Get methods
     /*
@@ -709,7 +735,7 @@ export class Pool implements Contract {
     }
     async getFullData(provider: ContractProvider) {
         let { stack } = await provider.get('get_pool_full_data', []);
-        let new_contract_version = stack.remaining == 34;
+        let contract_version = stack.remaining == 34 ? 2 : stack.remaining == 35 ? 3 : 1;
         let state = stack.readNumber() as State;
         let halted = stack.readBoolean();
         let totalBalance = stack.readBigNumber();
@@ -717,8 +743,12 @@ export class Pool implements Contract {
         let optimisticDepositWithdrawals = stack.readBoolean();
         let depositsOpen = stack.readBoolean();
         let instantWithdrawalFee = 0;
-        if(new_contract_version) {
+        if(contract_version >= 2) {
             instantWithdrawalFee = stack.readNumber();
+        }
+        let revShare = 0;
+        if (contract_version >= 3) {
+            revShare = stack.readNumber();
         }
         let savedValidatorSetHash = stack.readBigNumber();
 
@@ -730,6 +760,7 @@ export class Pool implements Contract {
         let prvExpected = prv.readBigNumber();
         let prvReturned = prv.readBigNumber();
         let prvProfit = prv.readBigNumber();
+        let prvWithdrawRatePrev2X24 = prv.readBigNumber();
         let previousRound = {
           borrowers: prvBorrowers,
           roundId: prvRoundId,
@@ -737,7 +768,8 @@ export class Pool implements Contract {
           borrowed: prvBorrowed,
           expected: prvExpected,
           returned: prvReturned,
-          profit: prvProfit
+          profit: prvProfit,
+          withdrawRatePrev2X24: prvWithdrawRatePrev2X24
         };
 
         let cur = stack.readTuple();
@@ -748,6 +780,7 @@ export class Pool implements Contract {
         let curExpected = cur.readBigNumber();
         let curReturned = cur.readBigNumber();
         let curProfit = cur.readBigNumber();
+        let curWithdrawRatePrev2X24 = cur.readBigNumber();
         let currentRound = {
           borrowers: curBorrowers,
           roundId: curRoundId,
@@ -755,7 +788,8 @@ export class Pool implements Contract {
           borrowed: curBorrowed,
           expected: curExpected,
           returned: curReturned,
-          profit: curProfit
+          profit: curProfit,
+          withdrawRatePrev2X24: curWithdrawRatePrev2X24
         };
 
         let minLoan = stack.readBigNumber();
@@ -765,7 +799,7 @@ export class Pool implements Contract {
         let accruedGovernanceFee = 0n;
         let disbalanceTolerance = 30;
         let creditStartPriorElectionsEnd = 0;
-        if(new_contract_version) {
+        if(contract_version >= 2) {
             accruedGovernanceFee = stack.readBigNumber();
             disbalanceTolerance = stack.readNumber();
             creditStartPriorElectionsEnd = stack.readNumber();
@@ -800,7 +834,7 @@ export class Pool implements Contract {
         return {
             state, halted,
             totalBalance, interestRate,
-            optimisticDepositWithdrawals, depositsOpen, instantWithdrawalFee,
+            optimisticDepositWithdrawals, depositsOpen, instantWithdrawalFee, revShare,
             savedValidatorSetHash,
 
             previousRound, currentRound,
@@ -829,7 +863,7 @@ export class Pool implements Contract {
 
     async getFullDataRaw(provider: ContractProvider) {
         let { stack } = await provider.get('get_pool_full_data_raw', []);
-        let new_contract_version = stack.remaining == 34;
+        let contract_version = stack.remaining == 34 ? 2 : stack.remaining == 35 ? 3 : 1;
         let state = stack.readNumber() as State;
         let halted = stack.readBoolean();
         let totalBalance = stack.readBigNumber();
@@ -837,8 +871,12 @@ export class Pool implements Contract {
         let optimisticDepositWithdrawals = stack.readBoolean();
         let depositsOpen = stack.readBoolean();
         let instantWithdrawalFee = 0;
-        if(new_contract_version) {
+        if(contract_version >= 2) {
             instantWithdrawalFee = stack.readNumber();
+        }
+        let revShare = 0;
+        if (contract_version >= 3) {
+            revShare = stack.readNumber();
         }
         let savedValidatorSetHash = stack.readBigNumber();
 
@@ -850,14 +888,16 @@ export class Pool implements Contract {
         let prvExpected = prv.readBigNumber();
         let prvReturned = prv.readBigNumber();
         let prvProfit = prv.readBigNumber();
+        let prvWithdrawRatePrev2X24 = prv.readBigNumber();
         let previousRound = {
-          borrowers: prvBorrowers,
-          roundId: prvRoundId,
-          activeBorrowers: prvActiveBorrowers,
-          borrowed: prvBorrowed,
-          expected: prvExpected,
-          returned: prvReturned,
-          profit: prvProfit
+            borrowers: prvBorrowers,
+            roundId: prvRoundId,
+            activeBorrowers: prvActiveBorrowers,
+            borrowed: prvBorrowed,
+            expected: prvExpected,
+            returned: prvReturned,
+            profit: prvProfit,
+            withdrawRatePrev2X24: prvWithdrawRatePrev2X24
         };
 
         let cur = stack.readTuple();
@@ -868,14 +908,16 @@ export class Pool implements Contract {
         let curExpected = cur.readBigNumber();
         let curReturned = cur.readBigNumber();
         let curProfit = cur.readBigNumber();
+        let curWithdrawRatePrev2X24 = cur.readBigNumber();
         let currentRound = {
-          borrowers: curBorrowers,
-          roundId: curRoundId,
-          activeBorrowers: curActiveBorrowers,
-          borrowed: curBorrowed,
-          expected: curExpected,
-          returned: curReturned,
-          profit: curProfit
+            borrowers: curBorrowers,
+            roundId: curRoundId,
+            activeBorrowers: curActiveBorrowers,
+            borrowed: curBorrowed,
+            expected: curExpected,
+            returned: curReturned,
+            profit: curProfit,
+            withdrawRatePrev2X24: curWithdrawRatePrev2X24
         };
 
         let minLoan = stack.readBigNumber();
@@ -885,7 +927,7 @@ export class Pool implements Contract {
         let accruedGovernanceFee = 0n;
         let disbalanceTolerance = 30;
         let creditStartPriorElectionsEnd = 0;
-        if(new_contract_version) {
+        if(contract_version >= 2) {
             accruedGovernanceFee = stack.readBigNumber();
             disbalanceTolerance = stack.readNumber();
             creditStartPriorElectionsEnd = stack.readNumber();
@@ -920,7 +962,7 @@ export class Pool implements Contract {
         return {
             state, halted,
             totalBalance, interestRate,
-            optimisticDepositWithdrawals, depositsOpen, instantWithdrawalFee,
+            optimisticDepositWithdrawals, depositsOpen, instantWithdrawalFee, revShare,
             savedValidatorSetHash,
 
             previousRound, currentRound,

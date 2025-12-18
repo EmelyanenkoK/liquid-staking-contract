@@ -32,3 +32,28 @@ const int SUDOER_QUARANTINE = 2 * 24 * 3600 ;
     }
     throw(1);
 }
+
+([cell, cell, cell], ()) ~process_sudo_child_codes_upgrade([cell, cell, cell] child_codes, slice sender_address, slice msg, slice sudoer, int sudoer_set_at) inline {
+    assert_sender!(sender_address, sudoer);
+    throw_unless(sudoer::quarantine, now() > sudoer_set_at + SUDOER_QUARANTINE);
+
+    slice codes = msg~load_ref().begin_parse();
+    var (controller_code, wallet_code, payout_code) = child_codes.untriple();
+
+    cell new_code = codes~load_maybe_ref();
+    ifnot(new_code.null?()) {
+        controller_code = new_code;
+    }
+
+    new_code = codes~load_maybe_ref();
+    ifnot(new_code.null?()) {
+        wallet_code = new_code;
+    }
+
+    new_code = codes~load_maybe_ref();
+    ifnot(new_code.null?()) {
+        payout_code = new_code;
+    }
+
+    return ([controller_code, wallet_code, payout_code], ());
+}

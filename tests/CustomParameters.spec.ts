@@ -313,7 +313,7 @@ describe('New operational parameters tests', () => {
         expect(res.transactions).toHaveTransaction({
             from: controller.address,
             on: pool.address,
-            op: Op.pool.request_loan,
+            op: Op.pool.request_loan2,
             aborted: true,
             exitCode: Errors.contradicting_borrowing_params
         });
@@ -456,7 +456,7 @@ describe('New operational parameters tests', () => {
         expect(res.transactions).toHaveTransaction({
             on: pool.address,
             from: controller.address,
-            op: Op.pool.request_loan,
+            op: Op.pool.request_loan2,
             aborted: true,
             success: false,
             exitCode: Errors.too_early_borrowing_request

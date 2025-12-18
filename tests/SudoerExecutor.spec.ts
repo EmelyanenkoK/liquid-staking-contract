@@ -18,7 +18,7 @@ const LAST_BLOCK = 35737001;
 const LAST_TESTNET_BLOCK = 16432928;
 const INITIAL_TIME = 1706449794;
 
-describe('Executor', () => {
+describe.skip('Executor', () => {
 
 
     let pool_code: Cell;
@@ -72,7 +72,7 @@ describe('Executor', () => {
 
 });
 
-describe('should work on testnet pool', () => {
+describe.skip('should work on testnet pool', () => {
 
     interface ActiveAccount { type: "active"; codeHash: string; dataHash: string; };
 

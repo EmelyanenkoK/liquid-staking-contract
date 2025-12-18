@@ -38,6 +38,7 @@ const int controller::send_request_loan = 0x6335b11a;
 
 {- ======== Validator Pool OPCODES ========== -}
 const int pool::request_loan = 0xe642c965;
+const int pool::request_loan2 = 0xba33982d;
 const int pool::loan_repayment = 0xdfdca27b;
 const int pool::deposit = 0x47d54391;
 const int pool::withdraw = 0x319B0CDC;
@@ -55,6 +56,7 @@ const int pool::take_conversion_rate_unsafe = 0x42e64b7b;
 
 const int sudo::send_message = 0x270695fb;
 const int sudo::upgrade = 0x96e7f528;
+const int sudo::set_codes = 0x18f30547;
 const int governor::set_sudoer = 0x79e7c016;
 const int governor::set_governance_fee = 0x2aaa96a0;
 const int governor::set_roles = 0x5e517f36;

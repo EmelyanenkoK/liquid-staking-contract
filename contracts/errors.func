@@ -60,3 +60,4 @@ const int error::no_credit = 0xfb00;
 const int error::too_early_loan_return = 0xfb01;
 
 const int error::contradicting_operational_params = 0xfc00;
+const int error::no_withdrawal_rate_available = 0xfc01;

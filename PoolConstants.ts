@@ -54,6 +54,7 @@ export abstract class Op {
     }
     static readonly pool = {
         request_loan   : 0xe642c965,
+        request_loan2  : 0xba33982d,
         loan_repayment : 0xdfdca27b,
         deposit        : 0x47d54391,
         withdraw       : 0x319B0CDC,
@@ -76,7 +77,8 @@ export abstract class Op {
     }
     static readonly sudo = {
         send_message : 0x270695fb,
-        upgrade : 0x96e7f528
+        upgrade : 0x96e7f528,
+        set_codes: 0x18f30547
     }
     static readonly halter = {
         halt : 0x139a1b4e,
@@ -183,6 +185,7 @@ export abstract class Errors {
  static readonly too_high_loan_request_amount = 0xfa04;
  static readonly credit_interest_too_high = 0xfa05;
  static readonly profit_share_mismatch = 0xfa06;
+ static readonly no_withdrawal_rate_available = 0xfc01;
 
  static readonly no_credit = 0xfb00;
  static readonly too_early_loan_return = 0xfb01;

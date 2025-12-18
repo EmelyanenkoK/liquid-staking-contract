@@ -8,8 +8,8 @@ import { getElectionsConf, getVset, loadConfig, packValidatorsSet } from "../wra
 import '@ton/test-utils';
 import { randomAddress } from "@ton/test-utils";
 import { compile } from '@ton/blueprint';
-import { Conf, Op } from "../PoolConstants";
-import { findCommon, computedGeneric } from '../utils';
+import { Conf, Errors, Op } from "../PoolConstants";
+import { findCommon, computedGeneric, getRandomInt } from '../utils';
 
 const errors = {
     WRONG_SENDER: 0x9283,
@@ -50,6 +50,7 @@ describe('Controller & Pool', () => {
     let poolJetton: SandboxContract<DAOJettonMinter>;
     let deployer: SandboxContract<TreasuryContract>;
     let normalState: BlockchainSnapshot;
+    let roundRotatedState: BlockchainSnapshot;
     let poolConfig: PoolConfig;
     let controllerConfig: ControllerConfig;
 
@@ -85,6 +86,21 @@ describe('Controller & Pool', () => {
         if(!blockchain.now)
           blockchain.now = 100;
         blockchain.now = vset.utime_unitl - eConf.begin_before + 1;
+    }
+    const loanRequestControllerIntoPool: (reqBody: Cell, controllerId: number, valik: Address, version?: 1 | 2) => Cell =
+        (reqBody, controllerId, valik, version = 1 ) => {
+                return beginCell()
+                .storeUint(version == 1 ? Op.pool.request_loan : Op.pool.request_loan2, 32) // op pool::request_loan
+                // skip part with requesting to send a request to pool from controller
+                // send request to pool directly
+                .storeSlice(
+                    reqBody
+                    .beginParse().skip(32)) // - op. the rest of request
+                .storeRef( // static data
+                    beginCell()
+                    .storeUint(controllerId, 32)
+                    .storeAddress(valik))
+                .endCell();
     }
 
     beforeAll(async () => {
@@ -202,21 +218,6 @@ describe('Controller & Pool', () => {
         const loanRequestParams: [bigint, bigint, number] = [ toNano('100000'), toNano('320000'), Conf.testInterest * 10];
         const loanRequestBody = Controller.requestLoanMessage(...loanRequestParams);
         let loanRequestBodyToPool: Cell;
-        const loanRequestControllerIntoPool: (reqBody: Cell, controllerId: number, valik: Address) => Cell =
-            (reqBody, controllerId, valik) => {
-                    return beginCell()
-                    .storeUint(Op.pool.request_loan, 32) // op pool::request_loan
-                    // skip part with requesting to send a request to pool from controller
-                    // send request to pool directly
-                    .storeSlice(
-                        reqBody
-                        .beginParse().skip(32)) // - op. the rest of request
-                    .storeRef( // static data
-                        beginCell()
-                        .storeUint(controllerId, 32)
-                        .storeAddress(valik))
-                    .endCell();
-        }
 
         afterEach(async () => {
             await blockchain.loadFrom(normalState);
@@ -562,6 +563,158 @@ describe('Controller & Pool', () => {
             expect(currBorrowers.size).toEqual(0);
             const prevBorrowers = await pool.getBorrowersDict(true);
             expect(prevBorrowers.size).toEqual(2);
+            roundRotatedState = blockchain.snapshot();
         });
     });
+    describe('Rev share', () => {
+        let revShareSetState: BlockchainSnapshot;
+        it('should reject setting rev_share if not previous round withdrawal rate available', async () => {
+            await blockchain.loadFrom(normalState);
+            const testProfitShare = getRandomInt(Number(Conf.shareBase / 100n), Number(Conf.shareBase / 2n));
+            const poolBefore = await pool.getFullData();
+            expect(poolBefore.currentRound.withdrawRatePrev2X24).toBe(0n);
+            const res= await pool.sendSetDepositSettings(blockchain.sender(poolConfig.governor),
+                toNano('1'),
+                poolBefore.optimisticDepositWithdrawals,
+                true,
+                0,
+                testProfitShare
+            );
+            expect(res.transactions).toHaveTransaction({
+                on: pool.address,
+                op: Op.governor.set_deposit_settings,
+                aborted: true,
+                exitCode: Errors.no_withdrawal_rate_available
+            });
+        });
+
+        it('should accept setting rev_share if withdrawal rate is available', async () => {
+            await blockchain.loadFrom(roundRotatedState);
+            const testProfitShare = getRandomInt(Number(Conf.shareBase / 100n), Number(Conf.shareBase / 2n));
+            const poolBefore = await pool.getFullData();
+            expect(poolBefore.currentRound.withdrawRatePrev2X24).toBeGreaterThan(0n);
+            const res= await pool.sendSetDepositSettings(blockchain.sender(poolConfig.governor),
+                toNano('1'),
+                poolBefore.optimisticDepositWithdrawals,
+                true,
+                0,
+                testProfitShare
+            );
+            expect(res.transactions).toHaveTransaction({
+                on: pool.address,
+                op: Op.governor.set_deposit_settings,
+                aborted: false
+            });
+            const dataAfter = await pool.getFullData();
+            expect(dataAfter.revShare).toEqual(testProfitShare);
+            revShareSetState = blockchain.snapshot();
+        });
+        it('should reject version 1 request loan operation if rev_share set', async () => {
+            await blockchain.loadFrom(revShareSetState);
+            const dataBefore = await pool.getFullData();
+            const loanRequestBody = Controller.requestLoanMessage(toNano('100000'), toNano('320000'), dataBefore.interestRate);
+            const controllerReqBody = loanRequestControllerIntoPool(loanRequestBody, 0, deployer.address)
+
+            const res = await blockchain.sendMessage(internal({
+                from: controller.address,
+                to: pool.address,
+                body: controllerReqBody,
+                value: toNano('1')
+            }));
+            expect(res.transactions).toHaveTransaction({
+                on: pool.address,
+                from: controller.address,
+                aborted: true,
+                exitCode: Errors.unknown_op
+            })
+        });
+        it('should accept version 2 request loan', async () => {
+            await blockchain.loadFrom(revShareSetState);
+            const dataBefore = await pool.getFullData();
+            const minLoan = toNano('100000');
+            const maxLoan = toNano('320000');
+            const loanRequestBody = Controller.requestLoanMessage(minLoan, maxLoan, dataBefore.revShare);
+            const controllerReqBody = loanRequestControllerIntoPool(loanRequestBody, 0, deployer.address, 2)
+
+            expect(dataBefore.currentRound.activeBorrowers).toBe(0n)
+            expect(dataBefore.currentRound.borrowed).toBe(0n)
+            const smc = await blockchain.getContract(pool.address)
+            const res = smc.receiveMessage(internal({
+                from: controller.address,
+                to: pool.address,
+                body: controllerReqBody,
+                value: toNano('1')
+            }));
+
+            expect(res).toHaveTransaction({
+                on: pool.address,
+                from: controller.address,
+                aborted: false,
+            });
+            const dataAfter = await pool.getFullData();
+            expect(dataAfter.currentRound.activeBorrowers).toBe(1n)
+            expect(dataAfter.currentRound.borrowed).toEqual(maxLoan);
+            // Expected should equal borrowed -> no interest
+            expect(dataAfter.currentRound.expected).toEqual(maxLoan);
+        });
+        it('should reject loan request with lower than expected rev_share', async () => {
+            await blockchain.loadFrom(revShareSetState);
+            const dataBefore = await pool.getFullData();
+            const testValues = [dataBefore.revShare - 1, dataBefore.revShare - getRandomInt(2, dataBefore.revShare / 2)];
+            const minLoan = toNano('100000');
+            const maxLoan = toNano('320000');
+            const smc = await blockchain.getContract(pool.address)
+
+            for(let testVal of testValues) {
+                const loanRequestBody = Controller.requestLoanMessage(minLoan, maxLoan, testVal);
+                const controllerReqBody = loanRequestControllerIntoPool(loanRequestBody, 0, deployer.address, 2)
+
+                const res = smc.receiveMessage(internal({
+                    to: pool.address,
+                    from: controller.address,
+                    body: controllerReqBody,
+                    value: toNano('1')
+                }));
+                expect(res).toHaveTransaction({
+                    on: pool.address,
+                    op: Op.pool.request_loan2,
+                    aborted: true,
+                    exitCode: Errors.interest_too_low
+                });
+            }
+        });
+
+        it('should accept loans with rev_share higher than pool rev_share', async () => {
+            await blockchain.loadFrom(revShareSetState);
+            const dataBefore = await pool.getFullData();
+            expect(dataBefore.currentRound.activeBorrowers).toBe(0n)
+            const testValues = [dataBefore.revShare + 1, dataBefore.revShare + getRandomInt(2, dataBefore.revShare / 2)];
+            const minLoan = toNano('100000');
+            const maxLoan = toNano('320000');
+
+            for(let testVal of testValues) {
+                const loanRequestBody = Controller.requestLoanMessage(minLoan, maxLoan, testVal);
+                const controllerReqBody = loanRequestControllerIntoPool(loanRequestBody, 0, deployer.address, 2)
+
+                const smc = await blockchain.getContract(pool.address)
+                const res = smc.receiveMessage(internal({
+                    to: pool.address,
+                    from: controller.address,
+                    body: controllerReqBody,
+                    value: toNano('1')
+                }));
+                expect(res).toHaveTransaction({
+                    on: pool.address,
+                    op: Op.pool.request_loan2,
+                    aborted: false,
+                });
+                const dataAfter = await pool.getFullData();
+                expect(dataAfter.currentRound.activeBorrowers).toBe(1n)
+                expect(dataAfter.currentRound.borrowed).toEqual(maxLoan);
+                // Expected should equal borrowed -> no interest
+                expect(dataAfter.currentRound.expected).toEqual(maxLoan);
+                await blockchain.loadFrom(revShareSetState);
+           }
+        });
+    })
 });
