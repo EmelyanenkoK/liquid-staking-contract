@@ -126,6 +126,8 @@ int current_round_index() inline {
 () initiate_distribution_of_pool_jettons (int round_id) impure;
 
 (int, int) _get_projected_conversion_ratio () inline;
+(int, int) get_deposit_rate() inline;
+(int, int) get_withdrawal_rate () inline;
 
 ;; special muldiv which is friendly for b == c == 0
 int muldiv_extra(int a, int b, int c) inline {
@@ -208,17 +210,8 @@ int muldiv_extra(int a, int b, int c) inline {
             [int optimistic_deposit_withdrawals,
              _, int instant_withdrawal_fee, int rev_share] = deposit_withdrawal_parameters;
 
-            int approximate_amount = 0;
-            if (rev_share == 0) {
-                approximate_amount = muldiv(jetton_amount, total_balance, supply);
-            } else {
-                int output_with_current_rate = muldiv(jetton_amount, total_balance, supply);
-
-                int previous_withdrawal_rate_x24 = withdrawal_rate_prev2_x24_from_round_data(current_round_borrowers);
-                int output_with_prev_rate = muldiv(jetton_amount, previous_withdrawal_rate_x24, SHARE_BASIS);
-
-                approximate_amount = min(output_with_current_rate, output_with_prev_rate);
-            }
+            (int balance_part, int supply_part) = get_withdrawal_rate();
+            int approximate_amount = muldiv(jetton_amount, balance_part, supply_part);
 
             if(optimistic_deposit_withdrawals &
                     request_immediate_withdrawal_if_possible &
@@ -261,9 +254,9 @@ int muldiv_extra(int a, int b, int c) inline {
             ;; and max(*,0) helps with that
 
             int funds_at_round_end = max(available_funds + borrowed - FINALIZE_ROUND_FEE, 0);
-            (int projected_balance, int projected_supply) = _get_projected_conversion_ratio ();
+            (balance_part, supply_part) = get_deposit_rate ();
             throw_unless( 100, ;; error_code doesn't matter it will be catched
-                         funds_at_round_end >= muldiv_extra(requested_for_withdrawal, projected_balance, projected_supply));
+                         funds_at_round_end >= muldiv_extra(requested_for_withdrawal, balance_part, supply_part));
         } catch (exc_arg, exc_num) {
             ;; note that sent_during_rotation is null because
             ;; effect of update_round is reverted in catch
@@ -397,8 +390,8 @@ int muldiv_extra(int a, int b, int c) inline {
                 throw_unless(error::deposit_amount_too_low, deposit_amount > 0);
                 if(optimistic_deposit_withdrawals) {
                     ;; we convert TON to Jetton at projected (expected) price at the round end
-                    (int expected_balance, int expected_supply) = _get_projected_conversion_ratio();
-                    int amount = muldiv_extra(deposit_amount, expected_supply, expected_balance);
+                    (int balance_part, int supply_part) = get_deposit_rate();
+                    int amount = muldiv_extra(deposit_amount, supply_part, balance_part);
                     throw_unless(error::output_amount_is_zero, amount);
                     request_to_mint_pool_jettons(sender_address, amount, query_id, true);
                     total_balance += deposit_amount; ;; supply also updated in request_to_mint_pool_jettons
@@ -427,9 +420,10 @@ int muldiv_extra(int a, int b, int c) inline {
 
               assert_sender!(sender_address, _get_controller_address(controller_id, validator));
 
+              (int balance_part, int supply_part) = get_deposit_rate();
               ;; maybe too harsh conditions
               int creditable_funds = balance
-                                     - muldiv_extra(requested_for_withdrawal, total_balance, supply)
+                                     - muldiv_extra(requested_for_withdrawal, balance_part, supply_part)
                                      - MIN_TONS_FOR_STORAGE;
               var [_, _, _, borrowed, _, _, _, _] = current_round_borrowers;
               int available_funds = min( creditable_funds,
@@ -538,14 +532,29 @@ int muldiv_extra(int a, int b, int c) inline {
                     .store_msgbody_prefix_slice()
                     .store_body_header(jetton::excesses, query_id);
             send_raw_message(msg.end_cell(), sendmode::CARRY_ALL_BALANCE);
-        } elseif (op == pool::get_conversion_rate_unsafe) {
+        } elseif (op == pool::get_deposit_rate_unsafe) {
             ;; Method called unsafe because data may change till response reach requester
-            (int projected_balance, int projected_supply) = _get_projected_conversion_ratio ();
+            (int balance_part, int supply_part) = get_deposit_rate ();
             in_msg_body.end_parse();
             builder response = begin_cell()
-                    .store_body_header(pool::take_conversion_rate_unsafe, query_id)
-                    .store_coins(projected_balance)
-                    .store_coins(projected_supply);
+                    .store_body_header(pool::take_deposit_rate_unsafe, query_id)
+                    .store_coins(balance_part)
+                    .store_coins(supply_part);
+            builder msg = begin_cell()
+                .store_msg_flags(msgflag::NON_BOUNCEABLE)
+                .store_slice(sender_address)
+                .store_coins(0)
+                .store_msgbody_prefix_slice()
+                .store_builder(response);
+            send_raw_message(msg.end_cell(), sendmode::CARRY_ALL_REMAINING_MESSAGE_VALUE);
+        } elseif (op == pool::get_withdrawal_rate_unsafe) {
+           ;; Method called unsafe because data may change till response reach requester
+            (int balance_part, int supply_part) = get_withdrawal_rate ();
+            in_msg_body.end_parse();
+            builder response = begin_cell()
+                    .store_body_header(pool::take_withdrawal_rate_unsafe, query_id)
+                    .store_coins(balance_part)
+                    .store_coins(supply_part);
             builder msg = begin_cell()
                 .store_msg_flags(msgflag::NON_BOUNCEABLE)
                 .store_slice(sender_address)
@@ -722,7 +731,8 @@ int muldiv_extra(int a, int b, int c) inline {
     ifnot(requested_for_withdrawal) {
         return ();
     }
-    int ton_withdrawal = muldiv(requested_for_withdrawal, total_balance, supply);
+    (int balance_part, int supply_part) = get_withdrawal_rate(); ;; note profit is already added to balance
+    int ton_withdrawal = muldiv(requested_for_withdrawal, balance_part, supply_part);
     slice prev_withdrawal_payout = withdrawal_payout;
     if(available_balance < ton_withdrawal + MIN_TONS_FOR_STORAGE) {
       ;; not enough money to withdraw
@@ -759,7 +769,10 @@ int muldiv_extra(int a, int b, int c) inline {
         return ();
     }
     ;; if supply == 0 distribute via 1:1 ratio
-    int jetton_mint = supply ? muldiv_extra(requested_for_deposit, supply, total_balance) : requested_for_deposit;
+    (int balance_part, int supply_part) = get_withdrawal_rate(); ;; note profit is already accounted in balance
+    ;; thus current withdrawal rate is deposit rate during prev round
+    ;; also note inverse order of (balance_part, supply_part) 
+    int jetton_mint = supply ? muldiv_extra(requested_for_deposit, supply_part, balance_part) : requested_for_deposit;
     sent_during_rotation += TRANSFER_NOTIFICATION_AMOUNT + PAYOUT_DISTRIBUTION_AMOUNT;
     request_to_mint_pool_jettons(deposit_payout,
                                  jetton_mint,
@@ -776,19 +789,34 @@ int muldiv_extra(int a, int b, int c) inline {
     return controller_address;
 }
 
+;; legacy method for compatibility with previous code
 (int, int) _get_projected_conversion_ratio () inline {
-    var [borrowers_dict, round_id, active_borrowers, borrowed, expected, returned, profit, withdrawal_rate_prev2_x24] = prev_round_borrowers;
-    [_, _, _, int rev_share] = deposit_withdrawal_parameters;
+    var [_, _, _, borrowed, expected, _, _, _] = prev_round_borrowers;
     int expected_profit = expected - borrowed - FINALIZE_ROUND_FEE;
     int fee = max(muldiv(governance_fee_share, expected_profit, SHARE_BASIS), 0);
     expected_profit -= fee;
-    ifnot (rev_share) {
-        return (max(total_balance + expected_profit, 0), supply);
-    } else {
-        return (total_balance, supply);
-    }
+    return (max(total_balance + expected_profit, 0), supply);
 }
 
+(int, int) get_deposit_rate () inline {
+    [_,  _, _, int rev_share] = deposit_withdrawal_parameters;
+    ifnot(rev_share) {
+      return _get_projected_conversion_ratio();
+    }
+    return (total_balance, supply);
+}
+
+(int, int) get_withdrawal_rate () inline {
+    [_,  _, _, int rev_share] = deposit_withdrawal_parameters;
+    ifnot(rev_share) {
+      return (total_balance, supply);
+    }
+    int previous_withdrawal_rate_x24 = withdrawal_rate_prev2_x24_from_round_data(current_round_borrowers);
+    int minimal_balance = min(total_balance, muldiv(supply, previous_withdrawal_rate_x24, SHARE_BASIS));
+    
+    return (minimal_balance, supply);
+    
+}
 
 (slice) get_controller_address(int controller_id, slice validator) method_id {
     load_data();
@@ -919,9 +947,9 @@ int calculate_loan_amount(int min_loan, int max_loan, int max_interest) method_i
             return -1;
         }
     }
-
+    (int balance_part, int supply_part) = get_deposit_rate();
     int creditable_funds = pair_first(get_balance())
-            - muldiv_extra(requested_for_withdrawal, total_balance, supply)
+            - muldiv_extra(requested_for_withdrawal, balance_part, supply_part)
             - MIN_TONS_FOR_STORAGE;
     var [_, _, _, borrowed, _, _, _, _] = current_round_borrowers;
     int available_funds = min( creditable_funds, muldiv((DISBALANCE_TOLERANCE_BASIS / 2) + disbalance_tolerance, total_balance, DISBALANCE_TOLERANCE_BASIS) - borrowed );

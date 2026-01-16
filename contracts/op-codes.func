@@ -48,8 +48,10 @@ const int pool::donate = 0x73affe21;
 
 const int pool::deploy_controller = 0xb27edcad;
 ;; Method called unsafe because data may change till response reach requester
-const int pool::get_conversion_rate_unsafe = 0x4b7b42e6;
-const int pool::take_conversion_rate_unsafe = 0x42e64b7b;
+const int pool::get_deposit_rate_unsafe = 0x4b7b42e6;
+const int pool::take_deposit_rate_unsafe = 0x42e64b7b;
+const int pool::get_withdrawal_rate_unsafe = 0x4b7b42e7;
+const int pool::take_withdrawal_rate_unsafe = 0x42e64b7c;
 
 {- ========== Governance OPCODES ========== -}
 
